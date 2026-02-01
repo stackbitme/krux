@@ -96,7 +96,7 @@ class MnemonicLoader(Page):
                 (t("Words"), self.load_key_from_text),
                 (t("Word Numbers"), self.pre_load_key_from_digits),
                 ("Tinyseed (Bits)", self.load_key_from_tiny_seed),
-                ("Stackbit 1248", self.load_key_from_1248_manual),
+                ("Stackbit 1248", self.load_key_from_1248),
             ],
         )
         index, status = submenu.run_loop()
@@ -259,20 +259,6 @@ class MnemonicLoader(Page):
 
     def load_key_from_1248(self):
         """Menu handler to load key from Stackbit 1248 sheet metal storage method"""
-        submenu = Menu(
-            self.ctx,
-            [
-                (t("Manual Entry"), self.load_key_from_1248_manual),
-                (t("Scan with Camera"), self.load_key_from_1248_scan),
-            ],
-        )
-        index, status = submenu.run_loop()
-        if index == ESC_KEY:
-            return MENU_CONTINUE
-        return status
-
-    def load_key_from_1248_manual(self):
-        """Menu handler to manually load key from Stackbit 1248"""
         from .stack_1248 import Stackbit
 
         stackbit = Stackbit(self.ctx)
