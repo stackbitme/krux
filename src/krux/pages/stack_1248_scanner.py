@@ -79,14 +79,15 @@ class StackbitScanner(Page):
         # Use threshold that separates bright plate from dark background
         blob_threshold = [(max(self.blob_otsu - 20, 50), 255)]
 
-        # Use smaller strides for more accurate edge detection
+        # Do NOT use merge=True - it can fuse the plate blob with nearby
+        # reflections/noise, creating a larger bounding box that misaligns the grid
         blobs = img.find_blobs(
             blob_threshold,
-            x_stride=5,
-            y_stride=5,
+            x_stride=10,
+            y_stride=10,
             area_threshold=2000,
             pixels_threshold=1500,
-            merge=True
+            merge=False
         )
 
         best_rect = None
@@ -106,6 +107,12 @@ class StackbitScanner(Page):
         for blob in blobs:
             rect = blob.rect()
             if rect[3] == 0 or rect[2] == 0:
+                continue
+
+            # Filter by density: a real plate blob should be mostly filled
+            # (not a scattered collection of small bright spots)
+            density = blob.density()
+            if density < 0.3:
                 continue
 
             aspect = rect[2] / rect[3]
@@ -131,7 +138,7 @@ class StackbitScanner(Page):
             # Score based on aspect ratio match
             aspect_score = 1.0 / (1.0 + aspect_diff * 3)
 
-            # Score based on area
+            # Score based on area (larger = more likely the real plate)
             area_score = min(1.0, blob.area() / 15000)
 
             # Score based on centering
@@ -142,8 +149,8 @@ class StackbitScanner(Page):
             max_dist = (img_center_x ** 2 + img_center_y ** 2) ** 0.5
             center_score = 1.0 - (dist_from_center / max_dist)
 
-            # Combined score
-            score = aspect_score * 0.5 + area_score * 0.35 + center_score * 0.15
+            # Combined score: area is most important (largest matching blob wins)
+            score = aspect_score * 0.35 + area_score * 0.5 + center_score * 0.15
 
             if score > best_score:
                 best_score = score
@@ -218,6 +225,10 @@ class StackbitScanner(Page):
         1. Adaptive threshold (luminance-based)
         2. Circular blob detection (shape-based)
         3. Contrast detection (dark vs light)
+
+        Includes background filter: if cell luminance is very low
+        (below background threshold), it's on the black background,
+        not on the plate surface - skip detection to avoid false positives.
         """
         if x < 0 or y < 0 or w <= 0 or h <= 0:
             return False
@@ -227,6 +238,15 @@ class StackbitScanner(Page):
         try:
             stats = img.get_statistics(roi=(x, y, w, h))
             cell_lum = stats.l_mean()
+
+            # Background filter: if luminance is very low, this cell is
+            # on the black background, not on the plate surface.
+            # A punched hole on a metal plate still has surrounding bright
+            # metal, so the average luminance stays above this threshold.
+            # The black background has uniformly low luminance (<30).
+            bg_threshold = max(30, self.blob_otsu * 0.25)
+            if cell_lum < bg_threshold:
+                return False
 
             is_punched = False
 

@@ -7,6 +7,7 @@ This is a fork of the Krux firmware with a custom **Stackbit 1248 Scanner** feat
 **Repository:** odudex/krux
 **Branch:** embed_fire
 **Device:** maixpy_embed_fire
+**Working directory:** `/Users/valandro/Downloads/krux_odudex/`
 
 ---
 
@@ -27,17 +28,30 @@ Stackbit 1248 is a metal backup plate for BIP39 seed phrases that uses binary-co
 
 ---
 
+## Supported Plates
+
+| Plate | Dimensions | Aspect Ratio | Orientation | Grid | Words/scan |
+|-------|-----------|--------------|-------------|------|------------|
+| **1248** (Full) | 85mm × 54mm | 1.574 | Landscape | 16×12 | 12 |
+| **1248mini** | 42.5mm × 54mm | 0.787 | Portrait | 8×12 | 6 |
+
+The scanner auto-detects the plate type based on aspect ratio.
+
+---
+
 ## Scanner Features
 
-- **Camera-based detection** of Stackbit 1248 metal plates
-- **16x12 grid overlay** adapts to detected plate (85mm × 54mm)
+- **Camera-based detection** of Stackbit 1248 metal plates (Full and Mini)
+- **Auto plate type detection** based on aspect ratio
+- **Grid overlay** adapts to detected plate (16×12 for Full, 8×12 for Mini)
 - **Multi-method punch detection:**
   - Adaptive threshold (luminance-based)
   - Circular blob detection (shape-based)
   - High contrast detection
+- **Background filter** prevents false detections on black background
 - **Real-time visualization** with black squares marking detected punches
 - **Visual Stackbit 1248 display** (6 words per page with grid representation)
-- **12 and 24 word support** (scan front, flip, scan back)
+- **12 and 24 word support**
 - **Auto wallet loading** - returns words directly to Krux load flow
 
 ---
@@ -61,21 +75,19 @@ Load Mnemonic → Via Manual Input → Stackbit 1248
 
 | File | Description |
 |------|-------------|
-| `src/krux/pages/stack_1248_scanner.py` | Main scanner implementation (~1040 lines) |
+| `src/krux/pages/stack_1248_scanner.py` | Main scanner implementation |
 | `src/krux/pages/stack_1248.py` | Manual entry implementation (existing) |
 | `src/krux/pages/mnemonic_loader.py` | Menu integration |
-| `STACKBIT_1248_SCANNER_CHANGELOG.md` | Detailed development changelog |
 
 ---
 
 ## Version History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| v1.0.0 | 31/01/2026 | Initial release with consistent centered sampling (70%×60%) |
-| v1.1.0 | 31/01/2026 | Fixed 1-2-4-8 bit mapping, improved plate detection (85×54mm), visual display |
-| v1.2.0 | 31/01/2026 | Auto wallet loading, menu reorganization |
-| v1.3.0 | 01/02/2026 | 24-word support, removed ASCII grid, improved row spacing |
+| Tag | Commit | Date | Changes |
+|-----|--------|------|---------|
+| `scanner-v0.1.0` | `6c0257b` | 01/02/2026 | Base working version - camera scanner, 12/24 word support |
+| `scanner-v0.2.0` | `9f695ff` | 01/02/2026 | 1248mini plate support, improved blob detection (stride 5), centering score |
+| `scanner-v0.3.0` | (current) | 06/02/2026 | Fix grid alignment (no merge), background filter for false detections |
 
 ---
 
@@ -96,19 +108,30 @@ sudo ./build/ktool-mac -B dan -b 1500000 -p /dev/cu.usbserial-XXX build/kboot.kf
 
 ## Plate Specifications
 
+### Full Plate (1248)
+
 | Property | Value |
 |----------|-------|
 | Dimensions | 85mm × 54mm |
-| Aspect ratio | 1.574 |
+| Aspect ratio | 1.574 (landscape) |
 | Rounded corners | 2mm radius |
 | Grid | 16 columns × 12 rows |
 | Capacity | 12 words per side (24 total) |
+
+### Mini Plate (1248mini)
+
+| Property | Value |
+|----------|-------|
+| Dimensions | 42.5mm × 54mm |
+| Aspect ratio | 0.787 (portrait) |
+| Grid | 8 columns × 12 rows |
+| Capacity | 6 words per side (12 total with front+back) |
 
 ---
 
 ## Technical Notes
 
-### Grid Layout (16×12)
+### Grid Layout - Full Plate (16×12)
 
 ```
 Col:  0   1   2-3   4-5   6-7  |  8   9   10-11  12-13  14-15
@@ -120,9 +143,21 @@ Row 10: Word 6 upper           | Word 12 upper
 Row 11: Word 6 lower           | Word 12 lower
 ```
 
-- Columns 0, 8: Indexers (word numbers - skipped)
-- Columns 1, 9: Milhar digit (1 or 2)
-- Columns 2-7, 10-15: Three pairs of 1-2-4-8 encoding
+### Grid Layout - Mini Plate (8×12)
+
+```
+Col:  0   1   2-3   4-5   6-7
+     idx mil  cen   dez   uni
+Row 0: Word 1 upper
+Row 1: Word 1 lower
+...
+Row 10: Word 6 upper
+Row 11: Word 6 lower
+```
+
+- Columns 0 (and 8 on Full): Indexers (word numbers - skipped)
+- Columns 1 (and 9 on Full): Milhar digit (1 or 2)
+- Columns 2-7 (and 10-15 on Full): Three pairs of 1-2-4-8 encoding
 
 ### 1-2-4-8 Bit Mapping
 
@@ -147,14 +182,25 @@ For consistent detection between live camera and final reading:
 
 ## Scanner Flow
 
-### 12-Word Mode
+### 12-Word Mode - Full Plate (1248)
 1. Position plate under camera
-2. Wait for grid alignment
+2. Wait for grid alignment (16×12 grid appears)
 3. Click/touch to capture
 4. View visual Stackbit 1248 table (page 1: words 1-6, page 2: words 7-12)
 5. If valid → returns words → Krux shows fingerprint → Load wallet
 
-### 24-Word Mode
+### 12-Word Mode - Mini Plate (1248mini)
+1. Position **front** of mini plate (words 1-6)
+2. Wait for grid alignment (8×12 grid appears)
+3. Click/touch to capture
+4. View visual table (words 1-6)
+5. **"Flip plate / Words 7-12"** message
+6. Position **back** of mini plate (words 7-12)
+7. Click/touch to capture
+8. View visual table (words 7-12)
+9. If valid → returns 12 words → Krux shows fingerprint → Load wallet
+
+### 24-Word Mode (Full Plate only)
 1. Position **front** of plate (words 1-12)
 2. Click/touch to capture
 3. View visual table (pages 1-2)
@@ -168,19 +214,32 @@ For consistent detection between live camera and final reading:
 
 ## Detection Methods
 
-### 1. Adaptive Threshold
+### Plate Detection (`_detect_plate`)
+- Uses `find_blobs()` with `merge=False` to avoid fusing plate with noise
+- Blob density filter (>0.3) ensures solid plate shape
+- Scores by: area (50%) + aspect ratio (35%) + centering (15%)
+- Auto-detects Full vs Mini based on aspect ratio
+
+### Background Filter
+Cells with very low luminance (< `max(30, otsu * 0.25)`) are classified as
+black background and skipped. Prevents false punch detections when the grid
+extends slightly beyond the plate edge.
+
+### Punch Detection (`_read_cell`)
+
+#### 1. Adaptive Threshold
 ```python
 relative_threshold = blob_otsu - 30
 is_punched = cell_lum < relative_threshold
 ```
 
-### 2. Circular Blob Detection
+#### 2. Circular Blob Detection
 ```python
 blobs = img.find_blobs(threshold, roi=cell, ...)
 is_punched = any(blob.roundness() > 0.3)
 ```
 
-### 3. High Contrast Detection
+#### 3. High Contrast Detection
 ```python
 is_punched = cell_stats.l_stdev() > 25
 ```
@@ -191,10 +250,10 @@ is_punched = cell_stats.l_stdev() > 25
 
 ## Future Improvements
 
-- [ ] Support for Stackbit 1248 Mini (half-width plate)
 - [ ] Adjustable detection thresholds in settings
 - [ ] Different lighting conditions presets
 - [ ] Export scanned data before loading
+- [ ] Snap effect (grid locks when stable for several frames)
 
 ---
 
@@ -206,12 +265,24 @@ is_punched = cell_stats.l_stdev() > 25
 3. Flash `build/kboot.kfpkg` to device
 4. Test via: Load Mnemonic → Via Camera → Stackbit 1248
 
+### Git Versioning
+```bash
+# After each change, commit and tag
+git add src/krux/pages/stack_1248_scanner.py
+git commit -m "feat: description of change"
+git tag scanner-vX.Y.Z -m "description"
+
+# To revert to a specific version
+git checkout scanner-vX.Y.Z -- src/krux/pages/stack_1248_scanner.py
+```
+
 ### Key Methods to Understand
-- `_detect_plate()` - Blob detection for plate edges
-- `_read_cell()` - Multi-method punch detection
-- `_decode_numbers_from_grid()` - 1-2-4-8 to decimal conversion
+- `_detect_plate()` - Blob detection for plate edges (Full + Mini)
+- `_read_cell()` - Multi-method punch detection with background filter
+- `_decode_6_words_from_half()` - 1-2-4-8 to decimal for 6 words
+- `_decode_numbers_from_grid()` - Full decoder (6 or 12 words)
 - `_show_stackbit_words()` - Visual table rendering
-- `scanner()` - Main loop with 12/24 word support
+- `scanner()` - Main loop with Full/Mini auto-detect, 12/24 word support
 
 ---
 
