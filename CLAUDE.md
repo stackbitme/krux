@@ -87,7 +87,8 @@ Load Mnemonic → Via Manual Input → Stackbit 1248
 |-----|--------|------|---------|
 | `scanner-v0.1.0` | `6c0257b` | 01/02/2026 | Base working version - camera scanner, 12/24 word support |
 | `scanner-v0.2.0` | `9f695ff` | 01/02/2026 | 1248mini plate support, improved blob detection (stride 5), centering score |
-| `scanner-v0.3.0` | (current) | 06/02/2026 | Fix grid alignment (no merge), background filter for false detections |
+| `scanner-v0.3.0` | `bd6b6fe` | 06/02/2026 | ~~Fix grid alignment~~ **REVERTED** - piorou leitura |
+| current | `57c2cb3` | 06/02/2026 | Revert para v0.2.0 (versão estável) |
 
 ---
 
@@ -215,15 +216,14 @@ For consistent detection between live camera and final reading:
 ## Detection Methods
 
 ### Plate Detection (`_detect_plate`)
-- Uses `find_blobs()` with `merge=False` to avoid fusing plate with noise
-- Blob density filter (>0.3) ensures solid plate shape
-- Scores by: area (50%) + aspect ratio (35%) + centering (15%)
+- Uses `find_blobs()` with `merge=True` and stride 5 for accurate edges
+- Scores by: aspect ratio (50%) + area (35%) + centering (15%)
 - Auto-detects Full vs Mini based on aspect ratio
 
-### Background Filter
-Cells with very low luminance (< `max(30, otsu * 0.25)`) are classified as
-black background and skipped. Prevents false punch detections when the grid
-extends slightly beyond the plate edge.
+### Important: Do NOT change punch detection logic
+Changes to `_read_cell()` or blob detection parameters have historically
+degraded reading quality. The current v0.2.0 parameters are stable.
+Any improvements should be tested very carefully before committing.
 
 ### Punch Detection (`_read_cell`)
 
