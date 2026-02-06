@@ -41,15 +41,18 @@ class StackbitScanner(Page):
     a 4-digit number (0001-2048).
 
     Plate specifications:
-    - Dimensions: 85mm x 54mm (aspect ratio = 1.574)
-    - Grid: 16 columns x 12 rows
-    - Capacity: 12 words per side (24 total with front+back)
+    - Full plate: 85mm x 54mm (aspect ratio = 1.574), 16x12 grid, 12 words
+    - Mini plate: 42.5mm x 54mm (aspect ratio = 0.787), 8x12 grid, 6 words
 
     Grid layout:
-    - Columns 0, 8: Word index numbers (skipped during reading)
-    - Columns 1, 9: Milhar digit (1 or 2)
-    - Columns 2-7, 10-15: Three pairs of 1-2-4-8 encoding
+    - Columns 0 (and 8 on full): Word index numbers (skipped during reading)
+    - Columns 1 (and 9 on full): Milhar digit (1 or 2)
+    - Columns 2-7 (and 10-15 on full): Three pairs of 1-2-4-8 encoding
     """
+
+    # Plate type constants
+    PLATE_FULL = "full"    # 85x54mm, 16x12 grid, 12 words
+    PLATE_MINI = "mini"    # 42.5x54mm, 8x12 grid, 6 words
 
     def __init__(self, ctx):
         super().__init__(ctx, None)
@@ -58,80 +61,142 @@ class StackbitScanner(Page):
         self.y_regions = []
         self.blob_otsu = 0x80
         self.debug_mode = True  # Show visual markers for detected punches
+        self.plate_type = self.PLATE_FULL  # Detected plate type
 
-    def _detect_plate(self, img):
+    def _detect_plate(self, img, force_type=None):
         """Detect the Stackbit 1248 plate as a bright blob
 
-        Returns the detected plate rectangle (x, y, w, h) or None
+        Args:
+            force_type: If set, only detect plates of this type (PLATE_FULL or PLATE_MINI)
+
+        Returns tuple: (rect, plate_type) or (None, None)
         """
         try:
             self.blob_otsu = img.get_histogram().get_threshold().value()
         except:
             pass
 
-        # Use a slightly lower threshold to better detect plate edges
-        blob_threshold = [(max(self.blob_otsu - 10, 60), 255)]
+        # Use threshold that separates bright plate from dark background
+        blob_threshold = [(max(self.blob_otsu - 20, 50), 255)]
+
+        # Use smaller strides for more accurate edge detection
         blobs = img.find_blobs(
-            blob_threshold, x_stride=20, y_stride=20, area_threshold=3000
+            blob_threshold,
+            x_stride=5,
+            y_stride=5,
+            area_threshold=2000,
+            pixels_threshold=1500,
+            merge=True
         )
 
         best_rect = None
         best_score = 0
+        best_type = None
 
-        # Target aspect ratio: 85 / 54 = 1.574
-        TARGET_ASPECT = 1.574
-        ASPECT_TOLERANCE = 0.25  # Allow 1.324 to 1.824
+        # Aspect ratios for different plate types
+        # Full plate: 85 / 54 = 1.574 (landscape)
+        # Mini plate: 42.5 / 54 = 0.787 (portrait)
+        FULL_ASPECT = 1.574
+        MINI_ASPECT = 0.787
+        ASPECT_TOLERANCE = 0.35
+
+        img_center_x = img.width() // 2
+        img_center_y = img.height() // 2
 
         for blob in blobs:
             rect = blob.rect()
-            if rect[3] == 0:
+            if rect[3] == 0 or rect[2] == 0:
                 continue
 
             aspect = rect[2] / rect[3]
 
-            # Allow plate to be partially outside the frame
-            margin = 5
-            if (rect[0] >= -margin and rect[1] >= -margin and
-                (rect[0] + rect[2]) < img.width() + margin and
-                (rect[1] + rect[3]) < img.height() + margin):
+            # Check which plate type matches
+            plate_type = None
+            aspect_diff = 999
 
-                # Check aspect ratio with tolerance
-                if abs(aspect - TARGET_ASPECT) < ASPECT_TOLERANCE:
-                    aspect_diff = abs(aspect - TARGET_ASPECT)
-                    area_score = min(1.0, blob.area() / 10000)
-                    score = (1.0 / (1.0 + aspect_diff * 2)) + area_score * 0.3
+            if force_type == self.PLATE_FULL or force_type is None:
+                if abs(aspect - FULL_ASPECT) < ASPECT_TOLERANCE:
+                    plate_type = self.PLATE_FULL
+                    aspect_diff = abs(aspect - FULL_ASPECT)
 
-                    if score > best_score:
-                        best_score = score
-                        best_rect = rect
+            if force_type == self.PLATE_MINI or force_type is None:
+                mini_diff = abs(aspect - MINI_ASPECT)
+                if mini_diff < ASPECT_TOLERANCE and mini_diff < aspect_diff:
+                    plate_type = self.PLATE_MINI
+                    aspect_diff = mini_diff
 
-        return best_rect
+            if plate_type is None:
+                continue
 
-    def _create_grid_over_rect(self, rect):
-        """Create 16x12 grid regions over detected rectangle"""
+            # Score based on aspect ratio match
+            aspect_score = 1.0 / (1.0 + aspect_diff * 3)
+
+            # Score based on area
+            area_score = min(1.0, blob.area() / 15000)
+
+            # Score based on centering
+            blob_center_x = rect[0] + rect[2] // 2
+            blob_center_y = rect[1] + rect[3] // 2
+            dist_from_center = ((blob_center_x - img_center_x) ** 2 +
+                               (blob_center_y - img_center_y) ** 2) ** 0.5
+            max_dist = (img_center_x ** 2 + img_center_y ** 2) ** 0.5
+            center_score = 1.0 - (dist_from_center / max_dist)
+
+            # Combined score
+            score = aspect_score * 0.5 + area_score * 0.35 + center_score * 0.15
+
+            if score > best_score:
+                best_score = score
+                best_rect = rect
+                best_type = plate_type
+
+        if best_rect:
+            self.plate_type = best_type
+
+        return best_rect, best_type
+
+    def _create_grid_over_rect(self, rect, plate_type=None):
+        """Create grid regions over detected rectangle
+
+        Args:
+            plate_type: PLATE_FULL (16x12) or PLATE_MINI (8x12)
+        """
         self.x_regions = []
         self.y_regions = []
 
+        if plate_type is None:
+            plate_type = self.plate_type
+
         x, y, w, h = rect
 
-        # 16 columns
-        col_width = w / 16
-        for i in range(17):
+        # Number of columns depends on plate type
+        num_cols = 16 if plate_type == self.PLATE_FULL else 8
+        col_width = w / num_cols
+        for i in range(num_cols + 1):
             self.x_regions.append(int(x + i * col_width))
 
-        # 12 rows
+        # 12 rows for both plate types
         row_height = h / 12
         for i in range(13):
             self.y_regions.append(int(y + i * row_height))
 
-    def _draw_grid(self, img, rect):
+    def _draw_grid(self, img, rect, plate_type=None):
         """Draw grid overlay on detected rectangle"""
+        if plate_type is None:
+            plate_type = self.plate_type
+
         # Draw rectangle outline
         img.draw_rectangle(rect, lcd.WHITE, thickness=2)
 
-        # Draw vertical lines (16 columns)
+        num_cols = 16 if plate_type == self.PLATE_FULL else 8
+
+        # Draw vertical lines
         for i, x in enumerate(self.x_regions):
-            thickness = 2 if i in (0, 8) else 1
+            # Thicker lines for word separators
+            if plate_type == self.PLATE_FULL:
+                thickness = 2 if i in (0, 8) else 1
+            else:
+                thickness = 2 if i == 0 else 1
             img.draw_line(
                 x, rect[1],
                 x, rect[1] + rect[3],
@@ -206,13 +271,24 @@ class StackbitScanner(Page):
         except:
             return False
 
-    def _create_16x12_grid_regions(self, rect):
-        """Create a 16x12 grid over the detected plate"""
+    def _create_grid_regions(self, rect, plate_type=None):
+        """Create grid over the detected plate
+
+        Args:
+            plate_type: PLATE_FULL (16x12) or PLATE_MINI (8x12)
+
+        Returns: (x_regions, y_regions)
+        """
+        if plate_type is None:
+            plate_type = self.plate_type
+
         x_regions = []
         y_regions = []
 
-        x_step = rect[2] / 16
-        for i in range(17):
+        num_cols = 16 if plate_type == self.PLATE_FULL else 8
+
+        x_step = rect[2] / num_cols
+        for i in range(num_cols + 1):
             x_regions.append(int(rect[0] + i * x_step))
 
         y_step = rect[3] / 12
@@ -221,9 +297,19 @@ class StackbitScanner(Page):
 
         return x_regions, y_regions
 
-    def _read_all_grid_cells(self, img, rect):
-        """Read all 16x12 grid cells and return a 2D boolean array"""
-        x_regions, y_regions = self._create_16x12_grid_regions(rect)
+    def _read_all_grid_cells(self, img, rect, plate_type=None):
+        """Read all grid cells and return a 2D boolean array
+
+        Args:
+            plate_type: PLATE_FULL (16x12) or PLATE_MINI (8x12)
+
+        Returns: (grid, x_regions, y_regions)
+        """
+        if plate_type is None:
+            plate_type = self.plate_type
+
+        x_regions, y_regions = self._create_grid_regions(rect, plate_type)
+        num_cols = 16 if plate_type == self.PLATE_FULL else 8
         grid = []
 
         for row_idx in range(12):
@@ -235,7 +321,7 @@ class StackbitScanner(Page):
             sample_h = int(h * 0.6)
             sample_y = y + int(h * 0.2)
 
-            for col_idx in range(16):
+            for col_idx in range(num_cols):
                 x = x_regions[col_idx]
                 w = x_regions[col_idx + 1] - x
                 sample_w = int(w * 0.7)
@@ -250,30 +336,34 @@ class StackbitScanner(Page):
 
         return grid, x_regions, y_regions
 
-    def _decode_numbers_from_grid(self, grid):
-        """Decode all 12 word numbers from the grid
+    def _decode_6_words_from_half(self, grid, col_offset=0):
+        """Decode 6 word numbers from one half of the grid
 
-        Returns list of 12 integers (word numbers 1-2048)
+        Args:
+            grid: 2D boolean array of punched cells
+            col_offset: 0 for left half (cols 0-7), 8 for right half (cols 8-15)
+
+        Returns list of 6 integers (word numbers 1-2048)
         """
         numbers = []
 
-        # Process left group (words 1-6, columns 0-7)
         for word_idx in range(6):
             row_upper = word_idx * 2
             row_lower = word_idx * 2 + 1
 
-            # Column 1: Milhar (skip col 0 indexer)
+            # Column 1 (or 9): Milhar (skip col 0/8 indexer)
+            milhar_col = col_offset + 1
             milhar = 0
-            if grid[row_upper][1]:
+            if grid[row_upper][milhar_col]:
                 milhar = 1
-            elif grid[row_lower][1]:
+            elif grid[row_lower][milhar_col]:
                 milhar = 2
 
-            # Columns 2-7: Three pairs of 1-2-4-8 encoding
+            # Columns 2-7 (or 10-15): Three pairs of 1-2-4-8 encoding
             digits = [milhar]
             for pair_idx in range(3):
-                col_left = 2 + pair_idx * 2
-                col_right = 3 + pair_idx * 2
+                col_left = col_offset + 2 + pair_idx * 2
+                col_right = col_offset + 3 + pair_idx * 2
 
                 # Left column: upper=1, lower=4
                 # Right column: upper=2, lower=8
@@ -288,43 +378,44 @@ class StackbitScanner(Page):
             number = digits[0] * 1000 + digits[1] * 100 + digits[2] * 10 + digits[3]
             numbers.append(number)
 
-        # Process right group (words 7-12, columns 8-15)
-        for word_idx in range(6):
-            row_upper = word_idx * 2
-            row_lower = word_idx * 2 + 1
-
-            # Column 9: Milhar (skip col 8 indexer)
-            milhar = 0
-            if grid[row_upper][9]:
-                milhar = 1
-            elif grid[row_lower][9]:
-                milhar = 2
-
-            # Columns 10-15: Three pairs of 1-2-4-8 encoding
-            digits = [milhar]
-            for pair_idx in range(3):
-                col_left = 10 + pair_idx * 2
-                col_right = 11 + pair_idx * 2
-
-                val_1 = 1 if grid[row_upper][col_left] else 0
-                val_4 = 4 if grid[row_lower][col_left] else 0
-                val_2 = 2 if grid[row_upper][col_right] else 0
-                val_8 = 8 if grid[row_lower][col_right] else 0
-
-                digit = val_1 + val_2 + val_4 + val_8
-                digits.append(digit)
-
-            number = digits[0] * 1000 + digits[1] * 100 + digits[2] * 10 + digits[3]
-            numbers.append(number)
-
         return numbers
 
-    def _show_stackbit_words(self, grid):
+    def _decode_numbers_from_grid(self, grid, plate_type=None):
+        """Decode word numbers from the grid
+
+        Args:
+            plate_type: PLATE_FULL (12 words) or PLATE_MINI (6 words)
+
+        Returns list of integers (word numbers 1-2048)
+        """
+        if plate_type is None:
+            plate_type = self.plate_type
+
+        if plate_type == self.PLATE_MINI:
+            # Mini plate: 8 columns, 6 words (same layout as left half)
+            return self._decode_6_words_from_half(grid, col_offset=0)
+        else:
+            # Full plate: 16 columns, 12 words
+            numbers = []
+            # Left half (words 1-6, columns 0-7)
+            numbers.extend(self._decode_6_words_from_half(grid, col_offset=0))
+            # Right half (words 7-12, columns 8-15)
+            numbers.extend(self._decode_6_words_from_half(grid, col_offset=8))
+            return numbers
+
+    def _show_stackbit_words(self, grid, word_offset=0, plate_type=None):
         """Show decoded words in Stackbit 1248 visual format
+
+        Args:
+            word_offset: Starting word index (0 for words 1-6/1-12, 6 for words 7-12)
+            plate_type: PLATE_FULL or PLATE_MINI
 
         Shows 6 words per page with visual grid representation
         """
-        numbers = self._decode_numbers_from_grid(grid)
+        if plate_type is None:
+            plate_type = self.plate_type
+
+        numbers = self._decode_numbers_from_grid(grid, plate_type)
 
         x_offset = DEFAULT_PADDING
         x_pad = 2 * FONT_WIDTH
@@ -488,32 +579,51 @@ class StackbitScanner(Page):
 
         row_spacing = 6
 
-        # Page 1: Words 1-6
-        self.ctx.display.clear()
-        self.ctx.display.draw_hcentered_text("Stackbit 1248")
-        y_pos = 2 * FONT_HEIGHT
-        for i in range(6):
-            draw_word_row(i + 1, numbers[i], y_pos)
-            y_pos += 2 * y_pad + row_spacing
+        # Determine number of words based on plate type
+        num_words = len(numbers)
 
-        self.ctx.input.wait_for_button()
+        if num_words == 6:
+            # Mini plate: single page with 6 words
+            self.ctx.display.clear()
+            self.ctx.display.draw_hcentered_text("Stackbit 1248 Mini")
+            y_pos = 2 * FONT_HEIGHT
+            for i in range(6):
+                # Use word_offset to show correct word indices (1-6 or 7-12)
+                draw_word_row(word_offset + i + 1, numbers[i], y_pos)
+                y_pos += 2 * y_pad + row_spacing
+            self.ctx.input.wait_for_button()
+        else:
+            # Full plate: two pages with 6 words each
+            # Page 1: Words 1-6
+            self.ctx.display.clear()
+            self.ctx.display.draw_hcentered_text("Stackbit 1248")
+            y_pos = 2 * FONT_HEIGHT
+            for i in range(6):
+                draw_word_row(word_offset + i + 1, numbers[i], y_pos)
+                y_pos += 2 * y_pad + row_spacing
+            self.ctx.input.wait_for_button()
 
-        # Page 2: Words 7-12
-        self.ctx.display.clear()
-        self.ctx.display.draw_hcentered_text("Stackbit 1248")
-        y_pos = 2 * FONT_HEIGHT
-        for i in range(6):
-            draw_word_row(i + 7, numbers[i + 6], y_pos)
-            y_pos += 2 * y_pad + row_spacing
+            # Page 2: Words 7-12
+            self.ctx.display.clear()
+            self.ctx.display.draw_hcentered_text("Stackbit 1248")
+            y_pos = 2 * FONT_HEIGHT
+            for i in range(6):
+                draw_word_row(word_offset + i + 7, numbers[i + 6], y_pos)
+                y_pos += 2 * y_pad + row_spacing
+            self.ctx.input.wait_for_button()
 
-        self.ctx.input.wait_for_button()
-
-    def _validate_and_get_words(self, grid):
+    def _validate_and_get_words(self, grid, plate_type=None):
         """Decode and validate words from grid
 
-        Returns list of 12 BIP39 words if all valid, None otherwise
+        Args:
+            plate_type: PLATE_FULL (12 words) or PLATE_MINI (6 words)
+
+        Returns list of BIP39 words if all valid, None otherwise
         """
-        numbers = self._decode_numbers_from_grid(grid)
+        if plate_type is None:
+            plate_type = self.plate_type
+
+        numbers = self._decode_numbers_from_grid(grid, plate_type)
         words = []
 
         for number in numbers:
@@ -527,14 +637,20 @@ class StackbitScanner(Page):
     def scanner(self, w24=False):
         """Scans the Stackbit 1248 plate with manual trigger
 
+        Automatically detects plate type:
+        - Full plate (85x54mm): 12 words at once
+        - Mini plate (42.5x54mm): 6 words, requires 2 scans for 12 words
+
         Args:
-            w24: If True, scans for 24 words (front + back of plate)
+            w24: If True, scans for 24 words (front + back of full plate)
 
         Returns:
             List of 12 or 24 BIP39 words if successfully read, None otherwise
         """
-        page = 0  # 0 = first 12 words, 1 = second 12 words
+        page = 0  # 0 = first scan, 1 = second scan (for mini or 24-word mode)
         all_words = []
+        detected_plate_type = None  # Will be set on first successful detection
+        mini_mode = False  # True if using mini plate for 12 words
 
         self.ctx.display.clear()
         if w24:
@@ -553,21 +669,27 @@ class StackbitScanner(Page):
             wdt.feed()
             img = self.ctx.camera.snapshot()
 
-            rect = self._detect_plate(img)
+            # Detect plate - for 24-word mode, force full plate detection
+            force_type = self.PLATE_FULL if w24 else None
+            rect, plate_type = self._detect_plate(img, force_type)
 
-            if rect:
-                self._create_grid_over_rect(rect)
-                self._draw_grid(img, rect)
+            if rect and plate_type:
+                self._create_grid_over_rect(rect, plate_type)
+                self._draw_grid(img, rect, plate_type)
 
                 # Mark detected punches in real-time
+                num_cols = 16 if plate_type == self.PLATE_FULL else 8
                 for row_idx in range(12):
                     y = self.y_regions[row_idx]
                     h = self.y_regions[row_idx + 1] - y
                     sample_h = int(h * 0.6)
                     sample_y = y + int(h * 0.2)
 
-                    for col_idx in range(16):
-                        if col_idx == 0 or col_idx == 8:
+                    for col_idx in range(num_cols):
+                        # Skip indexer columns
+                        if plate_type == self.PLATE_FULL and col_idx in (0, 8):
+                            continue
+                        if plate_type == self.PLATE_MINI and col_idx == 0:
                             continue
 
                         x = self.x_regions[col_idx]
@@ -582,17 +704,32 @@ class StackbitScanner(Page):
 
             # Check for click/touch to perform final reading
             if self.ctx.input.enter_event() or self.ctx.input.touch_event(validate_position=False):
-                if rect:
+                if rect and plate_type:
                     sensor.run(0)
                     self.ctx.display.to_portrait()
 
-                    grid, x_regions_viz, y_regions_viz = self._read_all_grid_cells(img, rect)
-                    self._show_stackbit_words(grid)
+                    # Remember plate type from first scan
+                    if detected_plate_type is None:
+                        detected_plate_type = plate_type
+                        mini_mode = (plate_type == self.PLATE_MINI and not w24)
 
-                    words = self._validate_and_get_words(grid)
+                    grid, x_regions_viz, y_regions_viz = self._read_all_grid_cells(img, rect, plate_type)
+
+                    # Calculate word offset for display
+                    if w24 and page == 1:
+                        word_offset = 12  # Second scan of 24-word mode: words 13-24
+                    elif mini_mode and page == 1:
+                        word_offset = 6   # Second scan of mini plate: words 7-12
+                    else:
+                        word_offset = 0   # First scan: words 1-6 or 1-12
+
+                    self._show_stackbit_words(grid, word_offset, plate_type)
+
+                    words = self._validate_and_get_words(grid, plate_type)
 
                     if words:
                         if w24:
+                            # 24-word mode: always uses full plate, 2 scans
                             if page == 0:
                                 all_words = words[:]
                                 page = 1
@@ -612,7 +749,29 @@ class StackbitScanner(Page):
                             else:
                                 all_words.extend(words)
                                 return all_words
+                        elif mini_mode:
+                            # Mini plate 12-word mode: 2 scans of 6 words each
+                            if page == 0:
+                                all_words = words[:]
+                                page = 1
+
+                                self.ctx.display.clear()
+                                self.flash_text(
+                                    t("Flip plate") + "\n" +
+                                    t("Words 7-12") + "\n\n" +
+                                    t("Click to read")
+                                )
+
+                                self.ctx.camera.initialize_run(mode=BINARY_GRID_MODE)
+                                self.ctx.camera.zoom_mode()
+                                self.ctx.display.to_landscape()
+                                self.ctx.display.clear()
+                                continue
+                            else:
+                                all_words.extend(words)
+                                return all_words
                         else:
+                            # Full plate 12-word mode: single scan
                             return words
 
                     # Invalid words - return to scanning
