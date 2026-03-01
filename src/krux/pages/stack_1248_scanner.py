@@ -30,7 +30,9 @@ from ..themes import theme
 from ..display import DEFAULT_PADDING, MINIMAL_PADDING, FONT_HEIGHT, FONT_WIDTH
 from ..camera import BINARY_GRID_MODE
 from ..wdt import wdt
-from ..input import BUTTON_ENTER, BUTTON_PAGE, BUTTON_PAGE_PREV, BUTTON_TOUCH
+from ..input import BUTTON_ENTER, BUTTON_PAGE, BUTTON_PAGE_PREV, BUTTON_TOUCH, FAST_FORWARD, FAST_BACKWARD
+from ..kboard import kboard
+from .stack_1248 import Stackbit, STACKBIT_GO_INDEX, STACKBIT_ESC_INDEX
 
 
 class StackbitScanner(Page):
@@ -334,6 +336,14 @@ class StackbitScanner(Page):
 
             grid.append(row)
 
+        # Filter rounded corner cells (3mm radius causes false detections)
+        # Affects the 4 physical corners of the plate
+        last_col = num_cols - 1
+        grid[0][0] = False
+        grid[0][last_col] = False
+        grid[11][0] = False
+        grid[11][last_col] = False
+
         return grid, x_regions, y_regions
 
     def _decode_6_words_from_half(self, grid, col_offset=0):
@@ -403,14 +413,77 @@ class StackbitScanner(Page):
             numbers.extend(self._decode_6_words_from_half(grid, col_offset=8))
             return numbers
 
-    def _show_stackbit_words(self, grid, word_offset=0, plate_type=None):
-        """Show decoded words in Stackbit 1248 visual format
+    def _edit_single_word(self, word_index, number):
+        """Edit a single word using the Stackbit 1248 editor UI
+
+        Reuses the existing Stackbit class for proven input handling.
 
         Args:
-            word_offset: Starting word index (0 for words 1-6/1-12, 6 for words 7-12)
+            word_index: Display index of the word (1-based)
+            number: Current word number (1-2048)
+
+        Returns:
+            New word number if confirmed (Go), or None if cancelled (Esc)
+        """
+        sb = Stackbit(self.ctx)
+
+        # Setup editor layout (same as enter_1248)
+        if not kboard.is_m5stickv:
+            sb.x_pad = 3 * FONT_WIDTH
+        else:
+            sb.x_pad = 2 * FONT_WIDTH
+        sb.x_offset = self.ctx.display.width() - 8 * sb.x_pad
+        sb.x_offset = max(sb.x_offset, DEFAULT_PADDING) // 2
+        sb.y_offset = 3 * FONT_HEIGHT
+        sb.y_pad = 2 * FONT_HEIGHT
+
+        index = 0
+        # Convert number to digits
+        num_str = "{:04d}".format(number)
+        digits = [int(c) for c in num_str]
+
+        self.ctx.display.clear()
+        while True:
+            sb._map_keys_array()
+            self.ctx.display.draw_hcentered_text("Edit Word " + str(word_index))
+            y_offset = sb.y_offset
+            sb._draw_grid(y_offset)
+            sb._draw_labels(y_offset, word_index)
+            sb._draw_menu()
+            if self.ctx.input.buttons_active:
+                sb._draw_index(index)
+            sb.preview_word(digits)
+            sb._draw_punched(digits, y_offset)
+
+            btn = self.ctx.input.wait_for_fastnav_button()
+            if btn == BUTTON_TOUCH:
+                btn = BUTTON_ENTER
+                index = self.ctx.input.touch.current_index()
+            if btn == BUTTON_ENTER:
+                if index >= STACKBIT_GO_INDEX:
+                    word = sb.digits_to_word(digits)
+                    if word is not None:
+                        return digits[0] * 1000 + digits[1] * 100 + digits[2] * 10 + digits[3]
+                elif index >= STACKBIT_ESC_INDEX:
+                    return None
+                elif index < 14:
+                    digits = sb._toggle_bit(digits, index)
+            else:
+                index = sb.index(index, btn)
+            self.ctx.display.clear()
+
+    def _show_stackbit_words(self, grid, word_offset=0, plate_type=None):
+        """Show decoded words with editing support and Back/Next navigation
+
+        Touch a word to edit it with the 1248 editor.
+        Back/Next buttons at footer to navigate pages.
+
+        Args:
+            word_offset: Starting word index offset
             plate_type: PLATE_FULL or PLATE_MINI
 
-        Shows 6 words per page with visual grid representation
+        Returns:
+            List of word numbers (possibly edited) or None if cancelled
         """
         if plate_type is None:
             plate_type = self.plate_type
@@ -420,6 +493,8 @@ class StackbitScanner(Page):
         x_offset = DEFAULT_PADDING
         x_pad = 2 * FONT_WIDTH
         y_pad = FONT_HEIGHT
+        row_spacing = 6
+        row_height = 2 * y_pad + row_spacing
 
         def draw_word_row(word_idx, number, y_offset):
             """Draw one word row with Stackbit 1248 visual representation"""
@@ -436,202 +511,175 @@ class StackbitScanner(Page):
             else:
                 word = "????"
 
-            # Draw word index background
             grid_x_offset = x_offset - FONT_WIDTH // 2
             index_x_offset = x_offset + x_pad // 2 - 1
             if len(str(word_idx)) > 1:
                 index_x_offset -= FONT_WIDTH
 
             self.ctx.display.fill_rectangle(
-                grid_x_offset,
-                y_offset - 2,
-                x_pad + FONT_WIDTH // 2,
-                2 * y_pad + 2,
+                grid_x_offset, y_offset - 2,
+                x_pad + FONT_WIDTH // 2, 2 * y_pad + 2,
                 theme.disabled_color,
             )
-
             self.ctx.display.draw_string(
-                index_x_offset,
-                y_offset + y_pad // 2,
-                str(word_idx),
-                theme.fg_color,
-                theme.disabled_color,
+                index_x_offset, y_offset + y_pad // 2,
+                str(word_idx), theme.fg_color, theme.disabled_color,
             )
 
-            # Draw 1-2-4-8 labels
-            numbers_offset = x_offset + x_pad
-            numbers_offset += (x_pad - FONT_WIDTH) // 2
+            numbers_offset = x_offset + x_pad + (x_pad - FONT_WIDTH) // 2
             upper_numbers = [1, 1, 2, 1, 2, 1, 2]
             lower_numbers = [2, 4, 8, 4, 8, 4, 8]
             label_y_offset = y_offset + (y_pad - FONT_HEIGHT) // 2
-
             for i in range(len(upper_numbers)):
-                self.ctx.display.draw_string(
-                    numbers_offset,
-                    label_y_offset,
-                    str(upper_numbers[i]),
-                    theme.fg_color,
-                )
-                self.ctx.display.draw_string(
-                    numbers_offset,
-                    label_y_offset + y_pad,
-                    str(lower_numbers[i]),
-                    theme.fg_color,
-                )
+                self.ctx.display.draw_string(numbers_offset, label_y_offset, str(upper_numbers[i]), theme.fg_color)
+                self.ctx.display.draw_string(numbers_offset, label_y_offset + y_pad, str(lower_numbers[i]), theme.fg_color)
                 numbers_offset += x_pad
 
-            # Draw grid lines
             width = 8 * x_pad + FONT_WIDTH // 2
             height = 2 * y_pad + 2
-
-            self.ctx.display.draw_line(
-                grid_x_offset, y_offset - 2,
-                grid_x_offset + width, y_offset - 2,
-                theme.frame_color,
-            )
-            self.ctx.display.draw_line(
-                grid_x_offset, y_offset - 2 + height,
-                grid_x_offset + width, y_offset - 2 + height,
-                theme.frame_color,
-            )
-
+            self.ctx.display.draw_line(grid_x_offset, y_offset - 2, grid_x_offset + width, y_offset - 2, theme.frame_color)
+            self.ctx.display.draw_line(grid_x_offset, y_offset - 2 + height, grid_x_offset + width, y_offset - 2 + height, theme.frame_color)
             x_bar = x_offset
-            self.ctx.display.draw_line(
-                grid_x_offset, y_offset - 2,
-                grid_x_offset, y_offset - 2 + height,
-                theme.frame_color,
-            )
+            self.ctx.display.draw_line(grid_x_offset, y_offset - 2, grid_x_offset, y_offset - 2 + height, theme.frame_color)
             x_bar += x_pad
-            self.ctx.display.draw_line(
-                x_bar, y_offset - 2,
-                x_bar, y_offset - 2 + height,
-                theme.frame_color,
-            )
+            self.ctx.display.draw_line(x_bar, y_offset - 2, x_bar, y_offset - 2 + height, theme.frame_color)
             x_bar += x_pad
             for _ in range(4):
-                self.ctx.display.draw_line(
-                    x_bar, y_offset - 2,
-                    x_bar, y_offset - 2 + height,
-                    theme.frame_color,
-                )
+                self.ctx.display.draw_line(x_bar, y_offset - 2, x_bar, y_offset - 2 + height, theme.frame_color)
                 x_bar += 2 * x_pad
 
-            # Draw punched marks
             outline_width = x_pad - 6
             outline_height = y_pad - 4
             outline_x = x_offset + x_pad + 3
-
             if digits[0] == 2:
-                self.ctx.display.outline(
-                    outline_x, y_offset + y_pad + 1,
-                    outline_width, outline_height,
-                    theme.highlight_color,
-                )
+                self.ctx.display.outline(outline_x, y_offset + y_pad + 1, outline_width, outline_height, theme.highlight_color)
             elif digits[0] == 1:
-                self.ctx.display.outline(
-                    outline_x, y_offset + 1,
-                    outline_width, outline_height,
-                    theme.highlight_color,
-                )
-
+                self.ctx.display.outline(outline_x, y_offset + 1, outline_width, outline_height, theme.highlight_color)
             outline_x += x_pad
             for d in range(3):
                 digit = digits[d + 1]
                 if (digit >> 3) & 1:
-                    self.ctx.display.outline(
-                        outline_x + x_pad, y_offset + y_pad + 1,
-                        outline_width, outline_height,
-                        theme.highlight_color,
-                    )
+                    self.ctx.display.outline(outline_x + x_pad, y_offset + y_pad + 1, outline_width, outline_height, theme.highlight_color)
                 if (digit >> 2) & 1:
-                    self.ctx.display.outline(
-                        outline_x, y_offset + y_pad + 1,
-                        outline_width, outline_height,
-                        theme.highlight_color,
-                    )
+                    self.ctx.display.outline(outline_x, y_offset + y_pad + 1, outline_width, outline_height, theme.highlight_color)
                 if (digit >> 1) & 1:
-                    self.ctx.display.outline(
-                        outline_x + x_pad, y_offset + 1,
-                        outline_width, outline_height,
-                        theme.highlight_color,
-                    )
+                    self.ctx.display.outline(outline_x + x_pad, y_offset + 1, outline_width, outline_height, theme.highlight_color)
                 if digit & 1:
-                    self.ctx.display.outline(
-                        outline_x, y_offset + 1,
-                        outline_width, outline_height,
-                        theme.highlight_color,
-                    )
+                    self.ctx.display.outline(outline_x, y_offset + 1, outline_width, outline_height, theme.highlight_color)
                 outline_x += 2 * x_pad
 
-            # Draw number and word on the right
-            self.ctx.display.draw_string(
-                x_offset + 17 * FONT_WIDTH,
-                y_offset,
-                digits_str,
-                theme.highlight_color,
-            )
-            self.ctx.display.draw_string(
-                x_offset + 17 * FONT_WIDTH,
-                y_offset + y_pad,
-                word,
-                theme.disabled_color,
-            )
+            self.ctx.display.draw_string(x_offset + 17 * FONT_WIDTH, y_offset, digits_str, theme.highlight_color)
+            self.ctx.display.draw_string(x_offset + 17 * FONT_WIDTH, y_offset + y_pad, word, theme.disabled_color)
 
-        row_spacing = 6
-
-        # Determine number of words based on plate type
+        # Split numbers into pages of 6
         num_words = len(numbers)
-
-        if num_words == 6:
-            # Mini plate: single page with 6 words
-            self.ctx.display.clear()
-            self.ctx.display.draw_hcentered_text("Stackbit 1248 Mini")
-            y_pos = 2 * FONT_HEIGHT
-            for i in range(6):
-                # Use word_offset to show correct word indices (1-6 or 7-12)
-                draw_word_row(word_offset + i + 1, numbers[i], y_pos)
-                y_pos += 2 * y_pad + row_spacing
-            self.ctx.input.wait_for_button()
+        if num_words <= 6:
+            title = "Stackbit 1248 Mini"
+            pages = [list(numbers)]
+            page_offsets = [word_offset]
         else:
-            # Full plate: two pages with 6 words each
-            # Page 1: Words 1-6
+            title = "Stackbit 1248"
+            pages = [list(numbers[:6]), list(numbers[6:])]
+            page_offsets = [word_offset, word_offset + 6]
+
+        current_page = 0
+
+        while True:
+            is_first = (current_page == 0)
+            is_last = (current_page == len(pages) - 1)
+            page_nums = pages[current_page]
+            num_on_page = len(page_nums)
+
+            # Draw page
             self.ctx.display.clear()
-            self.ctx.display.draw_hcentered_text("Stackbit 1248")
+            self.ctx.display.draw_hcentered_text(title)
+
+            y_positions = []
             y_pos = 2 * FONT_HEIGHT
-            for i in range(6):
-                draw_word_row(word_offset + i + 1, numbers[i], y_pos)
-                y_pos += 2 * y_pad + row_spacing
-            self.ctx.input.wait_for_button()
+            for i in range(num_on_page):
+                draw_word_row(page_offsets[current_page] + i + 1, page_nums[i], y_pos)
+                y_positions.append(y_pos)
+                y_pos += row_height
 
-            # Page 2: Words 7-12
-            self.ctx.display.clear()
-            self.ctx.display.draw_hcentered_text("Stackbit 1248")
-            y_pos = 2 * FONT_HEIGHT
-            for i in range(6):
-                draw_word_row(word_offset + i + 7, numbers[i + 6], y_pos)
-                y_pos += 2 * y_pad + row_spacing
-            self.ctx.input.wait_for_button()
+            # Draw footer: Back / Next (or Go)
+            footer_y = self.ctx.display.height() - FONT_HEIGHT - 4
+            if not is_first:
+                self.ctx.display.draw_string(x_offset, footer_y, "< " + t("Back"), theme.no_esc_color)
+            next_label = t("Next") + " >" if not is_last else t("Go") + " >"
+            next_color = theme.fg_color if not is_last else theme.go_color
+            next_x = self.ctx.display.width() - len(next_label) * FONT_WIDTH - x_offset
+            self.ctx.display.draw_string(next_x, footer_y, next_label, next_color)
 
-    def _validate_and_get_words(self, grid, plate_type=None):
-        """Decode and validate words from grid
+            # Setup touch regions: 2 columns x (num_on_page + 1) rows
+            # Indices: 0..2*num_on_page-1 = word rows, 2*num_on_page = Back, 2*num_on_page+1 = Next
+            if kboard.has_touchscreen:
+                self.ctx.input.touch.clear_regions()
+                mid_x = self.ctx.display.width() // 2
+                self.ctx.input.touch.x_regions.append(0)
+                self.ctx.input.touch.x_regions.append(mid_x)
+                self.ctx.input.touch.x_regions.append(self.ctx.display.width())
+                for yp in y_positions:
+                    self.ctx.input.touch.y_regions.append(yp - 2)
+                self.ctx.input.touch.y_regions.append(footer_y - 4)
+                self.ctx.input.touch.y_regions.append(self.ctx.display.height())
 
-        Args:
-            plate_type: PLATE_FULL (12 words) or PLATE_MINI (6 words)
+            # Wait for input
+            btn = self.ctx.input.wait_for_fastnav_button()
 
-        Returns list of BIP39 words if all valid, None otherwise
+            if btn == BUTTON_TOUCH:
+                idx = self.ctx.input.touch.current_index()
+                row = idx // 2
+                col = idx % 2
+
+                if row < num_on_page:
+                    # Touch on word row → edit it
+                    edited = self._edit_single_word(
+                        page_offsets[current_page] + row + 1,
+                        page_nums[row]
+                    )
+                    if edited is not None:
+                        pages[current_page][row] = edited
+                    # Redraw page (continue loop)
+                elif row == num_on_page:
+                    # Footer row
+                    if col == 0 and not is_first:
+                        current_page -= 1
+                    else:
+                        if is_last:
+                            result = []
+                            for p in pages:
+                                result.extend(p)
+                            return result
+                        current_page += 1
+            elif btn == BUTTON_ENTER:
+                if is_last:
+                    result = []
+                    for p in pages:
+                        result.extend(p)
+                    return result
+                current_page += 1
+            elif btn in (BUTTON_PAGE, FAST_FORWARD):
+                if is_last:
+                    result = []
+                    for p in pages:
+                        result.extend(p)
+                    return result
+                current_page += 1
+            elif btn in (BUTTON_PAGE_PREV, FAST_BACKWARD):
+                if not is_first:
+                    current_page -= 1
+
+    def _numbers_to_words(self, numbers):
+        """Convert list of word numbers to BIP39 words
+
+        Returns list of words if all valid, None otherwise
         """
-        if plate_type is None:
-            plate_type = self.plate_type
-
-        numbers = self._decode_numbers_from_grid(grid, plate_type)
         words = []
-
         for number in numbers:
             if 1 <= number <= 2048:
                 words.append(WORDLIST[number - 1])
             else:
                 return None
-
         return words
 
     def scanner(self, w24=False):
@@ -723,9 +771,12 @@ class StackbitScanner(Page):
                     else:
                         word_offset = 0   # First scan: words 1-6 or 1-12
 
-                    self._show_stackbit_words(grid, word_offset, plate_type)
+                    edited_numbers = self._show_stackbit_words(grid, word_offset, plate_type)
 
-                    words = self._validate_and_get_words(grid, plate_type)
+                    if edited_numbers is not None:
+                        words = self._numbers_to_words(edited_numbers)
+                    else:
+                        words = None
 
                     if words:
                         if w24:

@@ -48,9 +48,11 @@ The scanner auto-detects the plate type based on aspect ratio.
   - Adaptive threshold (luminance-based)
   - Circular blob detection (shape-based)
   - High contrast detection
-- **Background filter** prevents false detections on black background
+- **Rounded corner filter** ignores plate corner cells (3mm radius causes false detections)
 - **Real-time visualization** with black squares marking detected punches
 - **Visual Stackbit 1248 display** (6 words per page with grid representation)
+- **Word editing after scan** - touch any word to open 1248 editor, Go confirms, Esc cancels
+- **Back/Next page navigation** in word display (touch footer or use buttons)
 - **12 and 24 word support**
 - **Auto wallet loading** - returns words directly to Krux load flow
 
@@ -89,6 +91,7 @@ Load Mnemonic → Via Manual Input → Stackbit 1248
 | `scanner-v0.2.0` | `9f695ff` | 01/02/2026 | 1248mini plate support, improved blob detection (stride 5), centering score |
 | `scanner-v0.3.0` | `bd6b6fe` | 06/02/2026 | ~~Fix grid alignment~~ **REVERTED** - piorou leitura |
 | current | `57c2cb3` | 06/02/2026 | Revert para v0.2.0 (versão estável) |
+| `scanner-v0.4.0` | `78bfd8a` | 01/03/2026 | Word editing after scan, rounded corner filter |
 
 ---
 
@@ -188,7 +191,9 @@ For consistent detection between live camera and final reading:
 2. Wait for grid alignment (16×12 grid appears)
 3. Click/touch to capture
 4. View visual Stackbit 1248 table (page 1: words 1-6, page 2: words 7-12)
-5. If valid → returns words → Krux shows fingerprint → Load wallet
+5. Touch any word to edit it (opens 1248 editor, Go confirms, Esc cancels)
+6. Navigate pages with Back/Next footer buttons
+7. If valid → returns words → Krux shows fingerprint → Load wallet
 
 ### 12-Word Mode - Mini Plate (1248mini)
 1. Position **front** of mini plate (words 1-6)
@@ -278,10 +283,12 @@ git checkout scanner-vX.Y.Z -- src/krux/pages/stack_1248_scanner.py
 
 ### Key Methods to Understand
 - `_detect_plate()` - Blob detection for plate edges (Full + Mini)
-- `_read_cell()` - Multi-method punch detection with background filter
+- `_read_cell()` - Multi-method punch detection
 - `_decode_6_words_from_half()` - 1-2-4-8 to decimal for 6 words
 - `_decode_numbers_from_grid()` - Full decoder (6 or 12 words)
-- `_show_stackbit_words()` - Visual table rendering
+- `_edit_single_word()` - Opens Stackbit 1248 editor for a single word (reuses `Stackbit` class)
+- `_show_stackbit_words()` - Interactive word display with editing, returns edited numbers
+- `_numbers_to_words()` - Convert word numbers to BIP39 words
 - `scanner()` - Main loop with Full/Mini auto-detect, 12/24 word support
 
 ---
